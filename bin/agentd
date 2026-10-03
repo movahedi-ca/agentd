@@ -1,0 +1,11 @@
+#!/bin/sh
+# agentd launcher: runs the bundled package with the system python3.
+# install.sh bakes the library path in as AGENTD_LIB_DEFAULT.
+AGENTD_LIB_DEFAULT="$HOME/.local/share/agentd/app"
+exec python3 - "$@" <<'PYEOF'
+import os, sys
+lib = os.environ.get("AGENTD_LIB") or "__AGENTD_LIB_DEFAULT__"
+sys.path.insert(0, os.path.expanduser(lib))
+from agentd.cli import main
+sys.exit(main())
+PYEOF
