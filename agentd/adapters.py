@@ -9,8 +9,10 @@ argv element, never through a shell.
 from __future__ import annotations
 
 import json
+import queue
 import shutil
 import subprocess
+import threading
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -126,7 +128,9 @@ class ClaudeAdapter(AgentAdapter):
 
     def stream(self, prompt, *, cwd, timeout, env):
         # Claude's JSON envelope does not stream cleanly, so stream plain
-        # text output line by line from a non-JSON invocation.
+        # text output line by line from a non-JSON invocation. A reader
+        # thread feeds a queue so a CLI that hangs with stdout open (but
+        # silent) still hits the hard timeout instead of blocking forever.
         if not self.check_available():
             raise AdapterError("claude CLI not found on PATH")
         argv = ["claude", "-p"]
@@ -140,16 +144,44 @@ class ClaudeAdapter(AgentAdapter):
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         except FileNotFoundError as exc:
             raise AdapterError("claude CLI not found on PATH") from exc
+        chunks = queue.Queue()
+
+        def _reader():
+            try:
+                for line in proc.stdout:
+                    chunks.put(line)
+            finally:
+                chunks.put(None)  # EOF sentinel
+
+        reader = threading.Thread(target=_reader, daemon=True)
+        reader.start()
+        yielded_any = False
         try:
-            for line in proc.stdout:
+            while True:
+                remaining = timeout - (time.monotonic() - started)
+                if remaining <= 0:
+                    raise AdapterTimeout(
+                        f"claude stream timed out after {timeout}s")
+                try:
+                    line = chunks.get(timeout=remaining)
+                except queue.Empty:
+                    raise AdapterTimeout(
+                        f"claude stream timed out after {timeout}s")
+                if line is None:  # EOF
+                    break
+                yielded_any = True
                 yield line
-            remaining = max(1.0, timeout - (time.monotonic() - started))
-            proc.wait(timeout=remaining)
+            proc.wait(timeout=max(1.0, timeout - (time.monotonic() - started)))
         except subprocess.TimeoutExpired as exc:
-            raise AdapterTimeout(f"claude stream timed out after {timeout}s") from exc
+            raise AdapterTimeout(
+                f"claude stream timed out after {timeout}s") from exc
         finally:
             if proc.poll() is None:
                 proc.kill()
+        if proc.returncode not in (0, None) and not yielded_any:
+            stderr = proc.stderr.read() if proc.stderr else ""
+            raise AdapterError(
+                f"claude exited {proc.returncode}: {stderr.strip()[:500]}")
 
 
 class CodexAdapter(AgentAdapter):

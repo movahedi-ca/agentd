@@ -72,8 +72,12 @@ class _Handler(BaseHTTPRequestHandler):
             return True
         header = self.headers.get("Authorization") or ""
         scheme, _, token = header.partition(" ")
+        # Re-read the token file on every request so `agentd rotate-token`
+        # takes effect on a running daemon without a restart. Falls back to
+        # the startup token if the file vanished mid-run.
+        current = auth.read_token_file(self.server.cfg) or self.server.token
         if scheme.lower() != "bearer" or not auth.verify_token(
-                token.strip(), self.server.token):
+                token.strip(), current):
             self._error(401, "unauthorized", "valid bearer token required")
             return False
         return True
@@ -201,10 +205,16 @@ class _Handler(BaseHTTPRequestHandler):
             # Peek at the first chunk before sending headers so a missing
             # session (or an immediate adapter failure) still gets a
             # proper JSON error instead of a half-open SSE stream.
+            # StopIteration here means the CLI exited cleanly with zero
+            # output: a legitimate empty answer, not an error.
             chunks = mgr.stream(sid, prompt)
             iterator = iter(chunks)
+            empty_answer = False
             try:
                 first_chunk = next(iterator)
+            except StopIteration:
+                empty_answer = True
+                first_chunk = None
             except sessions.SessionNotFoundError:
                 self._error(404, "no_such_session", f"no session {sid!r}")
                 return self._audit(404, session_id=sid, started=started)
@@ -220,18 +230,20 @@ class _Handler(BaseHTTPRequestHandler):
             self.end_headers()
             try:
                 import itertools
-                for chunk in itertools.chain([first_chunk], iterator):
-                    line = "data: " + json.dumps({"chunk": chunk}) + "\n\n"
-                    self.wfile.write(line.encode())
-                    self.wfile.flush()
+                if not empty_answer:
+                    for chunk in itertools.chain([first_chunk], iterator):
+                        line = "data: " + json.dumps({"chunk": chunk}) + "\n\n"
+                        self.wfile.write(line.encode())
+                        self.wfile.flush()
                 self.wfile.write(b'data: {"done": true}\n\n')
                 self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError):
                 pass
             except sessions.PromptTimeoutError as exc:
                 try:
-                    line = "data: " + json.dumps({"error": str(exc)}) + "\n\n"
-                    self.wfile.write(line.encode())
+                    self.wfile.write(
+                        ("data: " + json.dumps({"error": str(exc)}) + "\n\n").encode())
+                    self.wfile.write(b'data: {"done": true}\n\n')
                     self.wfile.flush()
                 except (BrokenPipeError, ConnectionResetError):
                     pass

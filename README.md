@@ -72,7 +72,7 @@ Base: `http://127.0.0.1:8765`. Auth: `Authorization: Bearer <token>` on everythi
 | GET | `/v1/sessions` | List active sessions. |
 | GET | `/v1/sessions/{id}` | One session's record. |
 | POST | `/v1/sessions/{id}/prompt` | Body `{"prompt":"...","timeout":120}`. Blocks, returns `{"output":...,"exit_code":...,"duration_ms":...}`. |
-| POST | `/v1/sessions/{id}/stream` | Same body. Streams `text/event-stream`: `data: {"chunk": "..."}` events, then `data: {"done": true}`, then the connection closes. |
+| POST | `/v1/sessions/{id}/stream` | Same body. Streams `text/event-stream`: `data: {"chunk": "..."}` events, then `data: {"done": true}`, then the connection closes. A mid-stream timeout emits `data: {"error": "..."}` followed by `{"done": true}`; a CLI that exits with no output ends with just `{"done": true}`. |
 | DELETE | `/v1/sessions/{id}` | Ends the session and deletes its working dir. Returns `204`. |
 
 Errors are JSON: `{"error":"unauthorized"}`, `{"error":"no_such_session"}`, `{"error":"unknown_provider"}`, `{"error":"body_too_large"}`, `{"error":"prompt_timeout"}` (504), `{"error":"adapter_error"}` (502), `{"error":"session_limit"}` (429).
@@ -123,7 +123,7 @@ Untested. The code avoids platform-specific calls where it can, but path handlin
 ## Development
 
 ```sh
-python3 -m unittest discover -s tests   # 63 tests, stdlib only
+python3 -m unittest discover -s tests   # 68 tests, stdlib only
 ```
 
 The suite covers auth rejection, loopback-only binding, sandbox isolation, adapter behavior against fake CLIs, session lifecycle and TTL, timeouts, and the full HTTP surface including SSE. No commit lands unless the suite is green on the exact tree being committed.

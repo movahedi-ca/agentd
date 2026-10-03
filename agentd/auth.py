@@ -31,16 +31,31 @@ def _write_token_file(path):
     return token
 
 
-def get_token(cfg):
-    """Return the active bearer token, generating and storing one if needed."""
+def read_token_file(cfg):
+    """Return the active token without generating one, or None if absent.
+
+    The AGENTD_TOKEN env var wins when set. An empty file counts as absent.
+    """
     env_token = os.environ.get(TOKEN_ENV_VAR)
     if env_token:
         return env_token
     path = cfg["token_file"]
-    if os.path.exists(path):
-        os.chmod(path, 0o600)
-        with open(path) as fh:
-            return fh.read().strip()
+    if not os.path.exists(path):
+        return None
+    with open(path) as fh:
+        token = fh.read().strip()
+    return token or None
+
+
+def get_token(cfg):
+    """Return the active bearer token, generating and storing one if needed."""
+    token = read_token_file(cfg)
+    if token:
+        # Repair permissions on an existing file.
+        if os.path.exists(cfg["token_file"]):
+            os.chmod(cfg["token_file"], 0o600)
+        return token
+    path = cfg["token_file"]
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)

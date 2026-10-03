@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import errno
+import fcntl
 import json
 import os
 import signal
@@ -102,14 +103,33 @@ def cmd_start(args):
     if old_pid and _pid_alive(old_pid):
         print(f"agentd already running (pid {old_pid})", file=sys.stderr)
         return 1
+    # Lockfile closes the check-then-bind race: the lock is acquired before
+    # the port bind and held for the daemon's lifetime, so a second starter
+    # can never slip between the pid check and the bind.
+    lock_path = pid_file + ".lock"
+    lock_fh = open(lock_path, "w")
+    try:
+        fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print("agentd is already running (lock held by another starter)",
+              file=sys.stderr)
+        return 1
     _install_term_handler()
     if not args.foreground:
         _daemonize()
     # Token is generated here so install.sh / first start can show it once.
     auth.get_token(cfg)
-    srv = server.create_server(cfg)
+    try:
+        srv = server.create_server(cfg)
+    except OSError as exc:
+        # Usually "address already in use": another daemon (or process) beat
+        # us to the port after our pidfile check. Say so plainly.
+        print(f"agentd could not bind {cfg['bind']}:{cfg['port']}: {exc.strerror or exc}",
+              file=sys.stderr)
+        return 1
     with open(pid_file, "w") as fh:
         fh.write(str(os.getpid()))
+    srv._lock_fh = lock_fh  # keep the lock held while serving
     try:
         srv.serve_forever()
     finally:

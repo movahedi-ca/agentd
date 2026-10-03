@@ -151,17 +151,54 @@ class SessionManager:
             return result
 
     def stream(self, session_id, prompt, timeout=None):
-        """Yield output chunks for a prompt (SSE source). Blocking iterator."""
+        """Yield output chunks for a prompt (SSE source). Blocking iterator.
+
+        A wall-clock deadline bounds the whole stream: the adapter's
+        generator is pumped on a daemon thread and each chunk must arrive
+        before the deadline, so even an adapter that ignores its own
+        timeout cannot hang the caller past it.
+        """
         session = self.get(session_id)
         timeout = timeout if timeout is not None else self.cfg["prompt_timeout_seconds"]
         env = sandbox.scrub_env(cfg=self.cfg)
+        deadline = time.monotonic() + timeout + 5
         with session.lock:
+            gen = session.adapter.stream(
+                prompt, cwd=session.dir, timeout=timeout, env=env)
+            pump_queue = queue.Queue()
+
+            def _pump():
+                try:
+                    for chunk in gen:
+                        pump_queue.put(("chunk", chunk))
+                except BaseException as exc:  # noqa: BLE001 - forwarded
+                    pump_queue.put(("error", exc))
+                finally:
+                    pump_queue.put(("end", None))
+
+            pump = threading.Thread(target=_pump, daemon=True)
+            pump.start()
+            yielded_any = False
             try:
-                for chunk in session.adapter.stream(
-                        prompt, cwd=session.dir, timeout=timeout, env=env):
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise PromptTimeoutError(
+                            f"stream exceeded {timeout}s")
+                    try:
+                        kind, payload = pump_queue.get(timeout=remaining)
+                    except queue.Empty:
+                        raise PromptTimeoutError(
+                            f"stream exceeded {timeout}s")
+                    if kind == "end":
+                        break
+                    if kind == "error":
+                        raise payload
                     session.last_active = time.time()
-                    yield chunk
+                    yielded_any = True
+                    yield payload
             except adapters.AdapterTimeout as exc:
                 raise PromptTimeoutError(str(exc)) from exc
-            session.prompts += 1
+            if yielded_any:
+                session.prompts += 1
             session.last_active = time.time()

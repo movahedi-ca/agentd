@@ -26,10 +26,16 @@ case ":$PATH:" in
   *) echo "NOTE: $BIN is not on your PATH. Add it, e.g.:"; echo "  export PATH=\"$BIN:\$PATH\"";;
 esac
 
-TOKEN="$("$BIN/agentd" rotate-token)"
-echo
-echo "Installed. Your bearer token (shown once, stored 0600 at ~/.config/agentd/token):"
-echo "  $TOKEN"
+if [ -n "${AGENTD_TOKEN:-}" ]; then
+  echo "AGENTD_TOKEN is set in the environment; using it instead of a token file."
+  echo "Unset it and run 'agentd rotate-token' to switch to a stored token."
+  TOKEN="\$AGENTD_TOKEN"
+else
+  TOKEN="$("$BIN/agentd" rotate-token)"
+  echo
+  echo "Installed. Your bearer token (shown once, stored 0600 at ~/.config/agentd/token):"
+  echo "  $TOKEN"
+fi
 echo
 echo "Start the daemon:"
 echo "  agentd start"
